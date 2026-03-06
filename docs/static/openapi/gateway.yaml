@@ -1,0 +1,391 @@
+openapi: 3.0.3
+info:
+  title: Travel Concierge — API Gateway
+  description: |
+    The API Gateway is the single public entry point for the Travel Concierge platform.
+    It orchestrates the RAG pipeline: retrieving relevant context from the Embedding Service
+    and generating grounded answers via the Anthropic Claude API.
+
+    ## Authentication
+    Currently no authentication is required. In production, add an `Authorization` header
+    with a bearer token or API key.
+
+    ## Rate limits
+    No rate limits are enforced in the current version.
+
+    ## Interactive explorer
+    This spec is also served interactively at `/docs` (Swagger UI) on the running gateway.
+  version: 1.0.0
+  contact:
+    name: Travel Concierge
+    url: https://github.com/Bansal11/travel_concierge
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: chat
+    description: RAG-powered conversational AI endpoint
+  - name: packages
+    description: Holiday package knowledge base management
+  - name: ops
+    description: Operational endpoints
+
+paths:
+  /api/v1/chat:
+    post:
+      operationId: chat
+      tags: [chat]
+      summary: Chat with the travel concierge
+      description: |
+        Execute a two-stage RAG query:
+        1. The query is embedded and the top-K most similar document chunks are retrieved
+           from the vector store using HNSW approximate KNN.
+        2. A cross-encoder re-ranks the candidates to top-N for higher precision.
+        3. The top-N chunks are injected into a Claude prompt as context.
+        4. Claude generates a grounded answer that cites only the provided context.
+
+        Pass `history` to maintain conversational context across multiple turns.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            examples:
+              simple:
+                summary: Simple query
+                value:
+                  query: "What beach holidays do you have under £2,000?"
+              with_history:
+                summary: Multi-turn conversation
+                value:
+                  query: "How much is it for two people?"
+                  top_n: 3
+                  history:
+                    - role: user
+                      content: "What does the Bali package include?"
+                    - role: assistant
+                      content: "The Bali Explorer includes return flights, a 5-star resort..."
+      responses:
+        '200':
+          description: Grounded answer with source citations and latency telemetry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              example:
+                answer: "The Bali Explorer starts from £1,850 per person based on two sharing."
+                sources:
+                  - id: "3f2a1b4c-5e6f-7890-abcd-ef1234567890"
+                    source: "bali-explorer-7n.md"
+                    score: 4.21
+                latency:
+                  retrieval_ms: 18.4
+                  rerank_ms: 31.2
+                usage:
+                  model: "claude-sonnet-4-6"
+                  input_tokens: 412
+                  output_tokens: 94
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/ingest:
+    post:
+      operationId: ingestDocument
+      tags: [packages]
+      summary: Ingest a document into the vector store
+      description: |
+        Parses, chunks, embeds, and stores a document. The pipeline:
+        1. `DocumentLoader` normalises the raw text (strips Markdown syntax or flattens JSON)
+        2. `SlidingWindowSplitter` produces overlapping word-boundary chunks in O(N)
+        3. `SentenceTransformer` embeds all chunks in a single batch call
+        4. All chunks are batch-inserted into PostgreSQL with HNSW index entries updated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+            examples:
+              markdown:
+                summary: Markdown holiday package
+                value:
+                  content: "# Bali Explorer\n\n## Inclusions\n- Return flights\n- 5-star resort"
+                  source: "bali-explorer-7n.md"
+                  doc_type: "markdown"
+              json_package:
+                summary: JSON structured package
+                value:
+                  content: '{"destination":"Maldives","price_gbp":2400,"inclusions":["overwater bungalow"]}'
+                  source: "maldives-5n.json"
+                  doc_type: "json"
+                  metadata:
+                    category: "luxury"
+      responses:
+        '200':
+          description: Number of chunks stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestResponse'
+              example:
+                chunks_stored: 4
+                source: "bali-explorer-7n.md"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/packages:
+    get:
+      operationId: listPackages
+      tags: [packages]
+      summary: List all ingested packages
+      description: Returns all distinct document sources currently stored in the vector database, ordered by most recently updated.
+      responses:
+        '200':
+          description: List of packages with chunk counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageListResponse'
+              example:
+                packages:
+                  - source: "bali-explorer-7n.md"
+                    chunk_count: 4
+                    last_updated: "2026-03-06T14:32:11.000Z"
+                  - source: "maldives-5n.json"
+                    chunk_count: 2
+                    last_updated: "2026-03-06T14:30:05.000Z"
+                total: 2
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/packages/{source}:
+    delete:
+      operationId: deletePackage
+      tags: [packages]
+      summary: Delete a package and all its chunks
+      description: Permanently removes all vector chunks associated with the given source identifier. This operation is irreversible.
+      parameters:
+        - name: source
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The source identifier used at ingestion time (e.g. `bali-explorer-7n.md`)
+          example: "bali-explorer-7n.md"
+      responses:
+        '200':
+          description: Number of chunks deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+              example:
+                source: "bali-explorer-7n.md"
+                chunks_deleted: 4
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Not Found"
+                detail: "No chunks found for source 'bali-explorer-7n.md'"
+                statusCode: 404
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /health:
+    get:
+      operationId: healthCheck
+      tags: [ops]
+      summary: Liveness check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Natural-language question
+          example: "What beach holidays are available under £2,000?"
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+          default: []
+          description: Prior conversation turns for multi-turn context (most recent first)
+        top_n:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+          description: Number of re-ranked context chunks to inject into the LLM prompt
+
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+
+    ChatResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+          description: Grounded answer generated by Claude
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceCitation'
+        latency:
+          type: object
+          properties:
+            retrieval_ms:
+              type: number
+              description: Time for pgvector HNSW search in milliseconds
+            rerank_ms:
+              type: number
+              description: Time for cross-encoder re-ranking in milliseconds
+        usage:
+          type: object
+          properties:
+            model:
+              type: string
+              description: Claude model ID used for generation
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+
+    SourceCitation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          description: Document identifier
+        score:
+          type: number
+          description: Cross-encoder relevance score (higher = more relevant)
+
+    IngestRequest:
+      type: object
+      required: [content, source]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          description: Raw document text (Markdown or JSON string)
+        source:
+          type: string
+          minLength: 1
+          description: Unique document identifier (e.g. filename or URL)
+        doc_type:
+          type: string
+          enum: [markdown, json]
+          default: markdown
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional key-value annotations stored with every chunk
+
+    IngestResponse:
+      type: object
+      properties:
+        chunks_stored:
+          type: integer
+          description: Number of chunks created and stored
+        source:
+          type: string
+
+    PackageListResponse:
+      type: object
+      properties:
+        packages:
+          type: array
+          items:
+            $ref: '#/components/schemas/PackageInfo'
+        total:
+          type: integer
+
+    PackageInfo:
+      type: object
+      properties:
+        source:
+          type: string
+        chunk_count:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+          nullable: true
+
+    DeleteResponse:
+      type: object
+      properties:
+        source:
+          type: string
+        chunks_deleted:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+          nullable: true
+        statusCode:
+          type: integer
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: ValidationError
+            detail: "body/query must NOT have fewer than 1 characters"
+            statusCode: 400
+
+    ServiceUnavailable:
+      description: Downstream service error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: EmbeddingServiceUnavailable
+            detail: "Embedding service query failed: connect ECONNREFUSED"
+            statusCode: 503
