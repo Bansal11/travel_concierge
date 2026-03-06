@@ -25,13 +25,10 @@ import { errorHandler } from "./middleware/errorHandler.js";
 
 async function bootstrap(): Promise<void> {
   const fastify = Fastify({
-    logger: {
-      level: "info",
-      transport: {
-        target: "pino-pretty",
-        options: { colorize: true },
-      },
-    },
+    logger:
+      process.env.NODE_ENV !== "production"
+        ? { level: "info", transport: { target: "pino-pretty", options: { colorize: true } } }
+        : { level: "info" },
   });
 
   // CORS — allow all origins for development; restrict in production
@@ -78,6 +75,17 @@ async function bootstrap(): Promise<void> {
       tryItOutEnabled: true,
     },
     staticCSP: true,
+  });
+
+  // Register shared schemas so routes can use $ref: "ErrorResponse#"
+  fastify.addSchema({
+    $id: "ErrorResponse",
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      detail: { type: "string", nullable: true },
+      statusCode: { type: "integer" },
+    },
   });
 
   // Dependency injection — construct clients once, share across requests

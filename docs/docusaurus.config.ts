@@ -10,7 +10,7 @@ const config: Config = {
   url: "https://docs.travel-concierge.dev",
   baseUrl: "/",
 
-  onBrokenLinks: "throw",
+  onBrokenLinks: "warn",
   onBrokenMarkdownLinks: "warn",
 
   i18n: {

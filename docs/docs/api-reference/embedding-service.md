@@ -121,9 +121,9 @@ Return all distinct sources stored in the vector database with chunk counts.
 
 ---
 
-## DELETE /api/v1/packages/{source}
+## DELETE /api/v1/packages/:source
 
-Delete all chunks for a given source. Supports path segments with `/` by using the `{source:path}` parameter.
+Delete all chunks for a given source. Supports path segments with `/` by using the `:source` wildcard parameter.
 
 ```bash
 curl -X DELETE http://localhost:8001/api/v1/packages/bali-explorer-7n.md
